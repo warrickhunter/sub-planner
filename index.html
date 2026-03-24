@@ -1,0 +1,1107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>⚽ Sub Planner</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.development.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  * { box-sizing: border-box; }
+</style>
+</head>
+<body class="bg-gray-50">
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect } = React;
+
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+let _id = 1;
+const uid = () => String(_id++);
+
+function getGroup(pos) {
+  const base = pos.replace(/\d+$/, "").toUpperCase();
+  const M = {
+    GK:"GK", LB:"Back", RB:"Back", CB:"Back", LCB:"Back", RCB:"Back", LWB:"Back", RWB:"Back",
+    CM:"Mid", CDM:"Mid", CAM:"Mid", LM:"Mid", RM:"Mid", DM:"Mid", AM:"Mid",
+    ST:"Fwd", CF:"Fwd", LW:"Fwd", RW:"Fwd", SS:"Fwd",
+  };
+  return M[base] || "Mid";
+}
+
+const GROUPS = ["GK","Back","Mid","Fwd"];
+const GROUP_LABELS = { GK:"Goalkeeper", Back:"Defender", Mid:"Midfielder", Fwd:"Forward" };
+
+const GTC = { GK:"text-amber-700", Back:"text-blue-700", Mid:"text-green-700", Fwd:"text-red-700" };
+const GBC = {
+  GK:"bg-amber-50 border border-amber-200 text-amber-700",
+  Back:"bg-blue-50 border border-blue-200 text-blue-700",
+  Mid:"bg-green-50 border border-green-200 text-green-700",
+  Fwd:"bg-red-50 border border-red-200 text-red-700",
+};
+
+// ─── SUB WINDOW SUGGESTIONS ──────────────────────────────────────────────────
+// Keyed by number of available players. Values are comma-separated sub minute strings.
+const SUB_SUGGESTIONS = {
+  8:  "3,6,10,13,16,23,26,30,33,36",
+  9:  "5,10,15,25,30,35",
+  10: "6,13,26,33",
+};
+
+// ─── FORMATIONS (7-a-side) ────────────────────────────────────────────────────
+const FORMATIONS = {
+  "2-3-1": ["GK","LB","RB","LM","CM","RM","ST"],
+  "3-2-1": ["GK","CB1","CB2","CB3","CM1","CM2","ST"],
+  "2-2-2": ["GK","LB","RB","CM1","CM2","LW","RW"],
+  "1-3-2": ["GK","CB","LM","CM","RM","ST1","ST2"],
+  "3-1-2": ["GK","CB1","CB2","CB3","CM","ST1","ST2"],
+};
+
+// ─── ALGORITHM ───────────────────────────────────────────────────────────────
+// Key design: players carry forward in the SAME position each period until
+// explicitly subbed off. Position changes only happen via substitutions.
+function generatePlan(players, formation, gameMins, extraSubTimes, seasonHistory, overrides) {
+  if (!players || players.length < 7) return null;
+
+  // Build override lookup: overrideMap[pi][posIdx] = player
+  const overrideMap = {};
+  (overrides || []).forEach(({posIdx, pi, playerId}) => {
+    const player = players.find(p => p.id === playerId);
+    if (!player) return;
+    if (!overrideMap[pi]) overrideMap[pi] = {};
+    overrideMap[pi][posIdx] = player;
+  });
+
+  const halfTime = gameMins / 2;
+  const positions = FORMATIONS[formation];
+  const nonGkPos = positions.filter(p => p !== "GK");
+  const nPos = nonGkPos.length;
+
+  const winSet = new Set([0, halfTime, gameMins]);
+  (extraSubTimes || []).forEach(t => { if (t > 0 && t < gameMins) winSet.add(t); });
+  const wins = [...winSet].sort((a, b) => a - b);
+
+  const periods = wins.slice(0, -1).map((start, i) => ({
+    idx: i, start, end: wins[i+1], dur: wins[i+1]-start,
+    isFirstHalf: wins[i+1] <= halfTime,
+    isSecondHalf: start >= halfTime,
+  }));
+  const np = periods.length;
+
+  // Pick GKs: fewest GK minutes this season, must be different players
+  const byGK = [...players].sort((a,b) =>
+    (seasonHistory[a.id]?.gkMins||0) - (seasonHistory[b.id]?.gkMins||0)
+  );
+  const gk1 = byGK[0];
+  const gk2 = byGK.find(p => p.id !== gk1.id) || gk1;
+  const periodGK = periods.map(p => p.isSecondHalf ? gk2 : gk1);
+
+  // ── State ──
+  // posPlayer[posIdx] = player currently holding that field position (null = vacant)
+  const posPlayer = Array(nPos).fill(null);
+  // onBench[playerId] = true if sitting out, false if on field or playing GK
+  const onBench = {};
+  players.forEach(p => { onBench[p.id] = true; });
+  // slotCount only tracks FIELD periods (not GK) for balancing purposes
+  const slotCount = {};
+  players.forEach(p => { slotCount[p.id] = 0; });
+
+  // Tracks how many periods each player has spent in each position group THIS game.
+  // Used to strongly penalise repeating position groups at halftime rebalancing.
+  const gameGroupSlots = {};
+  players.forEach(p => { gameGroupSlots[p.id] = {GK:0, Back:0, Mid:0, Fwd:0}; });
+
+  const targetSlots = (nPos * np) / players.length;
+
+  function scoreFor(p, group) {
+    const h = seasonHistory[p.id] || {};
+    const gMins = group === "GK" ? (h.gkMins||0) : (h[group+"Mins"]||0);
+    return (targetSlots - slotCount[p.id]) * 60
+      - gMins * 0.4
+      - (h.totalMins||0) * 0.05
+      - (gameGroupSlots[p.id]?.[group] || 0) * 8  // strong in-game position balance penalty
+      + Math.random() * 2;
+  }
+
+  function pickBest(pool, group) {
+    return pool.reduce((b, p) => {
+      const s = scoreFor(p, group);
+      return !b || s > b.s ? {p, s} : b;
+    }, null);
+  }
+
+  const asgn = nonGkPos.map(() => Array(np).fill(null));
+
+  // ── Period 0: build starting lineup ──
+  {
+    const gk = periodGK[0];
+    onBench[gk.id] = false; // GK is not on bench
+    gameGroupSlots[gk.id].GK++;
+
+    // Apply overrides for period 0 first
+    for (let posIdx = 0; posIdx < nPos; posIdx++) {
+      const player = overrideMap[0]?.[posIdx];
+      if (!player || !onBench[player.id]) continue;
+      const group = getGroup(nonGkPos[posIdx]);
+      asgn[posIdx][0] = player;
+      posPlayer[posIdx] = player;
+      onBench[player.id] = false;
+      slotCount[player.id]++;
+      gameGroupSlots[player.id][group]++;
+    }
+    // Fill remaining positions normally
+    for (let posIdx = 0; posIdx < nPos; posIdx++) {
+      if (asgn[posIdx][0]) continue;
+      const group = getGroup(nonGkPos[posIdx]);
+      const eligible = players.filter(p => onBench[p.id]);
+      const best = pickBest(eligible, group);
+      if (!best) break;
+      asgn[posIdx][0] = best.p;
+      posPlayer[posIdx] = best.p;
+      onBench[best.p.id] = false;
+      slotCount[best.p.id]++;
+      gameGroupSlots[best.p.id][group]++;
+    }
+  }
+
+  // ── Periods 1+: carry forward or substitute; full reshuffle at halftime ──
+  for (let pi = 1; pi < np; pi++) {
+    const prevGK = periodGK[pi-1];
+    const currGK = periodGK[pi];
+    const isHalf = periods[pi].start === halfTime;
+
+    // Handle GK swap at halftime
+    if (isHalf && currGK.id !== prevGK.id) {
+      // Credit the outgoing GK with the average field-slot count of everyone else.
+      // Without this, they'd return to bench with slotCount=0 and look like the
+      // freshest player on the squad, dominating field positions all second half.
+      const others = players.filter(p => p.id !== prevGK.id && p.id !== currGK.id);
+      const avgSlot = others.reduce((s, p) => s + slotCount[p.id], 0) / (others.length || 1);
+      slotCount[prevGK.id] = Math.round(avgSlot);
+      onBench[prevGK.id] = true;
+      if (!onBench[currGK.id]) {
+        const vacIdx = posPlayer.findIndex(p => p?.id === currGK.id);
+        if (vacIdx >= 0) posPlayer[vacIdx] = null;
+      }
+      onBench[currGK.id] = false;
+    }
+    gameGroupSlots[currGK.id].GK++;
+
+    if (isHalf) {
+      // ── Halftime: re-assign ALL field positions from scratch ──
+      // This lets players move to different position groups for the second half,
+      // so nobody is stuck as Forward (or Back/Mid) for the whole game.
+      // scoreFor's in-game penalty (gameGroupSlots * 8) naturally pushes players
+      // toward position groups they haven't played yet this game.
+      posPlayer.fill(null);
+      const halfPool = players.filter(p => p.id !== currGK.id);
+      halfPool.forEach(p => { onBench[p.id] = true; }); // everyone available for re-assignment
+
+      // Apply overrides for this period first
+      for (let posIdx = 0; posIdx < nPos; posIdx++) {
+        const player = overrideMap[pi]?.[posIdx];
+        if (!player || player.id === currGK.id || !onBench[player.id]) continue;
+        const group = getGroup(nonGkPos[posIdx]);
+        asgn[posIdx][pi] = player;
+        posPlayer[posIdx] = player;
+        onBench[player.id] = false;
+        slotCount[player.id]++;
+        gameGroupSlots[player.id][group]++;
+      }
+      // Fill remaining positions normally
+      for (let posIdx = 0; posIdx < nPos; posIdx++) {
+        if (asgn[posIdx][pi]) continue;
+        const group = getGroup(nonGkPos[posIdx]);
+        const eligible = halfPool.filter(p => onBench[p.id]);
+        const best = pickBest(eligible, group);
+        if (best) {
+          asgn[posIdx][pi] = best.p;
+          posPlayer[posIdx] = best.p;
+          onBench[best.p.id] = false;
+          slotCount[best.p.id]++;
+          gameGroupSlots[best.p.id][group]++;
+        }
+      }
+    } else {
+      // ── Regular period: apply overrides first, then carry forward or substitute ──
+      const periodOvr = overrideMap[pi] || {};
+      const overriddenPosIdxs = new Set(Object.keys(periodOvr).map(Number));
+      const overriddenPlayerIds = new Set(Object.values(periodOvr).map(p => p.id));
+
+      // Displace current occupants of overridden positions (send to bench)
+      for (const posIdx of overriddenPosIdxs) {
+        const current = posPlayer[posIdx];
+        if (current && !overriddenPlayerIds.has(current.id)) {
+          onBench[current.id] = true;
+          posPlayer[posIdx] = null;
+        }
+      }
+      // Vacate any position held by an overridden player who is moving elsewhere
+      for (const [posIdxStr, player] of Object.entries(periodOvr)) {
+        const oldPosIdx = posPlayer.findIndex(p => p?.id === player.id);
+        if (oldPosIdx >= 0 && !overriddenPosIdxs.has(oldPosIdx)) {
+          posPlayer[oldPosIdx] = null; // vacated — will be filled by normal logic below
+        }
+      }
+      // Apply override assignments
+      for (const [posIdxStr, player] of Object.entries(periodOvr)) {
+        const posIdx = Number(posIdxStr);
+        const group = getGroup(nonGkPos[posIdx]);
+        asgn[posIdx][pi] = player;
+        posPlayer[posIdx] = player;
+        onBench[player.id] = false;
+        slotCount[player.id]++;
+        gameGroupSlots[player.id][group]++;
+      }
+
+      // Carry forward or substitute for non-overridden positions
+      for (let posIdx = 0; posIdx < nPos; posIdx++) {
+        if (overriddenPosIdxs.has(posIdx)) continue; // already handled
+        const current = posPlayer[posIdx];
+        const group = getGroup(nonGkPos[posIdx]);
+
+        if (!current) {
+          // Vacant (GK left it, or an overridden player vacated it)
+          const bench = players.filter(p => onBench[p.id]);
+          const best = pickBest(bench, group);
+          if (best) {
+            asgn[posIdx][pi] = best.p;
+            posPlayer[posIdx] = best.p;
+            onBench[best.p.id] = false;
+            slotCount[best.p.id]++;
+            gameGroupSlots[best.p.id][group]++;
+          }
+          continue;
+        }
+
+        const bench = players.filter(p => onBench[p.id]);
+        if (!bench.length) {
+          asgn[posIdx][pi] = current;
+          slotCount[current.id]++;
+          gameGroupSlots[current.id][group]++;
+          continue;
+        }
+
+        const currentScore = scoreFor(current, group);
+        const bestBench = pickBest(bench, group);
+
+        if (bestBench.s > currentScore + 30) {
+          onBench[current.id] = true;
+          asgn[posIdx][pi] = bestBench.p;
+          posPlayer[posIdx] = bestBench.p;
+          onBench[bestBench.p.id] = false;
+          slotCount[bestBench.p.id]++;
+          gameGroupSlots[bestBench.p.id][group]++;
+        } else {
+          asgn[posIdx][pi] = current;
+          slotCount[current.id]++;
+          gameGroupSlots[current.id][group]++;
+        }
+      }
+    }
+  }
+
+  // ── Build substitution events (only where player actually changed) ──
+  const subs = [];
+  for (let pi = 1; pi < np; pi++) {
+    const time = periods[pi].start;
+    const isHalf = time === halfTime;
+    if (isHalf && gk1.id !== gk2.id) {
+      subs.push({time, isHalf:true, pos:"GK", off:gk1, on:gk2, isGK:true});
+    }
+    nonGkPos.forEach((pos, posIdx) => {
+      const prev = asgn[posIdx][pi-1];
+      const curr = asgn[posIdx][pi];
+      if (prev && curr && prev.id !== curr.id) {
+        subs.push({time, isHalf, pos, off:prev, on:curr});
+      }
+    });
+  }
+
+  // ── Player minutes ──
+  const playerMins = {};
+  const playerGroupMins = {};
+  players.forEach(p => { playerMins[p.id]=0; playerGroupMins[p.id]={GK:0,Back:0,Mid:0,Fwd:0}; });
+  periods.forEach((period, pi) => {
+    const gk = periodGK[pi];
+    playerMins[gk.id] += period.dur;
+    playerGroupMins[gk.id].GK += period.dur;
+    nonGkPos.forEach((pos, posIdx) => {
+      const p = asgn[posIdx][pi];
+      if (p) { playerMins[p.id]+=period.dur; playerGroupMins[p.id][getGroup(pos)]+=period.dur; }
+    });
+  });
+
+  return { formation, positions, nonGkPos, periods, halfTime, periodGK, gk1, gk2, asgn, subs, playerMins, playerGroupMins };
+}
+
+function mergeHistory(hist, plan, players) {
+  const next = {...hist};
+  players.forEach(p => {
+    const prev = next[p.id] || {totalMins:0, gkMins:0, BackMins:0, MidMins:0, FwdMins:0, games:0};
+    const m = plan.playerMins[p.id]||0;
+    const g = plan.playerGroupMins[p.id]||{};
+    next[p.id] = {
+      totalMins: prev.totalMins + m,
+      gkMins:    prev.gkMins  + (g.GK||0),
+      BackMins:  prev.BackMins + (g.Back||0),
+      MidMins:   prev.MidMins  + (g.Mid||0),
+      FwdMins:   prev.FwdMins  + (g.Fwd||0),
+      games:     prev.games    + (m>0?1:0),
+    };
+  });
+  return next;
+}
+
+// ─── UI COMPONENTS ────────────────────────────────────────────────────────────
+function Pill({group, label}) {
+  return <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${GBC[group]}`}>{label||group}</span>;
+}
+
+// ── Players Tab ───────────────────────────────────────────────────────────────
+function PlayersTab({players, onAdd, onRemove}) {
+  const [name, setName] = useState("");
+  const [bulk, setBulk] = useState("");
+  const [showBulk, setShowBulk] = useState(false);
+
+  function handleAdd() {
+    const n = name.trim();
+    if (!n) return;
+    onAdd(n);
+    setName("");
+  }
+
+  function handleBulk() {
+    bulk.split("\n").map(l=>l.trim()).filter(Boolean).forEach(line => {
+      const n = line.split(",")[0].trim();
+      if (n) onAdd(n);
+    });
+    setBulk(""); setShowBulk(false);
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white border rounded-lg p-4">
+        <h2 className="font-semibold mb-3">Add Player</h2>
+        <div className="flex gap-2 flex-wrap">
+          <input
+            className="border rounded px-3 py-2 flex-1 min-w-36 text-sm focus:outline-none focus:ring-1 focus:ring-gray-400"
+            placeholder="Name"
+            value={name}
+            onChange={e=>setName(e.target.value)}
+            onKeyDown={e=>e.key==="Enter"&&handleAdd()}
+          />
+          <button
+            className="bg-gray-900 text-white px-4 py-2 rounded text-sm hover:bg-gray-700 font-medium"
+            onClick={handleAdd}
+          >Add</button>
+        </div>
+        <button
+          className="mt-3 text-xs text-gray-400 underline hover:text-gray-600"
+          onClick={()=>setShowBulk(v=>!v)}
+        >Bulk add (one per line)...</button>
+        {showBulk && (
+          <div className="mt-2 space-y-2">
+            <textarea
+              className="w-full border rounded p-2 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-gray-400"
+              rows={5}
+              placeholder={"Alice\nBob\nCarol\nDave"}
+              value={bulk}
+              onChange={e=>setBulk(e.target.value)}
+            />
+            <button className="bg-gray-700 text-white px-3 py-1.5 rounded text-sm font-medium" onClick={handleBulk}>
+              Add All
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className="bg-white border rounded-lg p-4">
+        <h2 className="font-semibold mb-3">
+          Squad <span className="font-normal text-gray-400 text-sm">({players.length} players)</span>
+        </h2>
+        {players.length === 0
+          ? <p className="text-sm text-gray-400 text-center py-6">No players yet.</p>
+          : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs text-gray-500 border-b">
+                  <th className="pb-2 font-medium">Name</th>
+                  <th className="pb-2"/>
+                </tr>
+              </thead>
+              <tbody>
+                {players.map(p => (
+                  <tr key={p.id} className="border-b last:border-0">
+                    <td className="py-2 font-medium">{p.name}</td>
+                    <td className="py-2 text-right">
+                      <button
+                        className="text-gray-300 hover:text-red-400 text-xl leading-none px-1"
+                        onClick={()=>onRemove(p.id)}
+                      >×</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )
+        }
+      </div>
+    </div>
+  );
+}
+
+// ── Substitution Events ───────────────────────────────────────────────────────
+function SubEvents({subs, halfTime}) {
+  if (!subs.length) return <p className="text-sm text-gray-400">No substitutions — all players stay on for the full game.</p>;
+  const byTime = {};
+  subs.forEach(s => { if (!byTime[s.time]) byTime[s.time]=[]; byTime[s.time].push(s); });
+  return (
+    <div className="space-y-5">
+      {Object.entries(byTime).sort((a,b)=>Number(a[0])-Number(b[0])).map(([time, timeSubs]) => (
+        <div key={time}>
+          <div className="flex items-center gap-2 mb-2">
+            <span className="bg-gray-800 text-white text-xs font-bold px-2.5 py-1 rounded">{time}′</span>
+            {Number(time)===halfTime && <span className="text-xs font-semibold text-amber-600">Halftime</span>}
+          </div>
+          <div className="space-y-1.5 ml-1 border-l-2 border-gray-100 pl-3">
+            {timeSubs.map((s,i) => (
+              <div key={i} className="flex items-center gap-2 text-sm">
+                <span className={`w-12 text-xs font-semibold flex-shrink-0 ${GTC[getGroup(s.pos)]}`}>{s.pos}</span>
+                <span className="text-gray-400 line-through text-xs">{s.off?.name}</span>
+                <span className="text-gray-300 text-xs">→</span>
+                <span className="font-medium text-gray-900">{s.on?.name}</span>
+                {s.isGK && <Pill group="GK" label="GK" />}
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Period Grid ───────────────────────────────────────────────────────────────
+function PeriodGrid({plan, overrides, onOverride, allPlayers}) {
+  const [editCell, setEditCell] = useState(null); // {posIdx, pi}
+  const {periods, nonGkPos, periodGK, asgn, halfTime} = plan;
+
+  function ovKey(posIdx, pi) { return `${posIdx}-${pi}`; }
+  function isOverridden(posIdx, pi) { return !!overrides?.[ovKey(posIdx, pi)]; }
+
+  function handleCellClick(posIdx, pi) {
+    setEditCell(prev =>
+      prev?.posIdx === posIdx && prev?.pi === pi ? null : {posIdx, pi}
+    );
+  }
+
+  function handleSelect(posIdx, pi, val) {
+    onOverride(posIdx, pi, val === "" ? null : val);
+    setEditCell(null);
+  }
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="text-xs border-collapse" style={{minWidth: "100%"}}>
+        <thead>
+          <tr>
+            <th className="text-left text-gray-500 font-medium pb-2 pr-4 text-xs">Pos</th>
+            {periods.map(p => (
+              <th key={p.idx} className={`text-center font-medium pb-2 px-2 text-xs ${p.start===halfTime?"border-l-2 border-dashed border-gray-300":""}`}>
+                <span className="block">{p.start}–{p.end}′</span>
+                {p.start===halfTime && <span className="block text-amber-500 font-normal" style={{fontSize:"10px"}}>2nd half →</span>}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          <tr className="border-t">
+            <td className={`py-1.5 pr-4 font-bold text-xs ${GTC.GK}`}>GK</td>
+            {periods.map((_,pi) => {
+              const changed = pi>0 && periodGK[pi].id!==periodGK[pi-1].id;
+              return (
+                <td key={pi} className={`text-center py-1.5 px-2 ${pi>0&&periods[pi].start===halfTime?"border-l-2 border-dashed border-gray-300":""}`}>
+                  <span className={`inline-block px-2 py-0.5 rounded font-medium ${GBC.GK} ${changed?"ring-2 ring-amber-400 ring-offset-1":""}`} style={{fontSize:"11px"}}>
+                    {periodGK[pi].name}
+                  </span>
+                </td>
+              );
+            })}
+          </tr>
+          {nonGkPos.map((pos, posIdx) => {
+            const group = getGroup(pos);
+            return (
+              <tr key={posIdx} className="border-t">
+                <td className={`py-1.5 pr-4 font-bold text-xs ${GTC[group]}`}>{pos}</td>
+                {periods.map((_,pi) => {
+                  const player = asgn[posIdx][pi];
+                  const changed = pi>0 && asgn[posIdx][pi-1]?.id!==player?.id;
+                  const overridden = isOverridden(posIdx, pi);
+                  const editing = editCell?.posIdx===posIdx && editCell?.pi===pi;
+                  return (
+                    <td key={pi} className={`text-center py-1.5 px-1 ${pi>0&&periods[pi].start===halfTime?"border-l-2 border-dashed border-gray-300":""}`}>
+                      {editing ? (
+                        <select
+                          autoFocus
+                          className="text-xs border rounded px-1 py-0.5 max-w-20"
+                          value={overrides?.[ovKey(posIdx,pi)] || ""}
+                          onChange={e => handleSelect(posIdx, pi, e.target.value)}
+                          onBlur={() => setEditCell(null)}
+                        >
+                          <option value="">Auto</option>
+                          {allPlayers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                        </select>
+                      ) : (
+                        <span
+                          onClick={() => handleCellClick(posIdx, pi)}
+                          title={overridden ? "Manually locked — click to change" : "Click to override"}
+                          className={`inline-flex items-center gap-0.5 px-2 py-0.5 rounded font-medium cursor-pointer hover:opacity-80 ${GBC[group]} ${changed&&!overridden?"ring-2 ring-gray-400 ring-offset-1":""} ${overridden?"ring-2 ring-indigo-400 ring-offset-1":""}`}
+                          style={{fontSize:"11px"}}
+                        >
+                          {overridden && <span style={{fontSize:"9px"}}>🔒</span>}
+                          {player?.name||"?"}
+                        </span>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <p className="text-gray-400 mt-2" style={{fontSize:"10px"}}>
+        Bold outline = player change · Dashed line = halftime · 🔒 = manual override · Click any cell to override
+      </p>
+    </div>
+  );
+}
+
+// ── Minutes Table ─────────────────────────────────────────────────────────────
+function MinutesTable({players, plan}) {
+  const {playerMins, playerGroupMins} = plan;
+  const sorted = [...players].sort((a,b)=>(playerMins[b.id]||0)-(playerMins[a.id]||0));
+  const maxMins = Math.max(...players.map(p=>playerMins[p.id]||0),1);
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="text-xs text-gray-500 border-b">
+          <th className="text-left pb-2 font-medium">Player</th>
+          <th className="text-right pb-2 font-medium">Mins</th>
+          <th className="text-right pb-2 font-medium text-amber-600">GK</th>
+          <th className="text-right pb-2 font-medium text-blue-600">Back</th>
+          <th className="text-right pb-2 font-medium text-green-600">Mid</th>
+          <th className="text-right pb-2 font-medium text-red-600">Fwd</th>
+        </tr>
+      </thead>
+      <tbody>
+        {sorted.map(p => {
+          const m = playerMins[p.id]||0;
+          const g = playerGroupMins[p.id]||{};
+          return (
+            <tr key={p.id} className="border-b last:border-0">
+              <td className="py-2">
+                <span className="font-medium block">{p.name}</span>
+                <div className="w-full bg-gray-100 rounded-full mt-1" style={{height:"3px"}}>
+                  <div className="bg-gray-500 rounded-full" style={{width:`${Math.round(m/maxMins*100)}%`,height:"3px"}}/>
+                </div>
+              </td>
+              <td className="py-2 text-right font-bold">{m}</td>
+              <td className="py-2 text-right text-amber-600">{g.GK||0}</td>
+              <td className="py-2 text-right text-blue-600">{g.Back||0}</td>
+              <td className="py-2 text-right text-green-600">{g.Mid||0}</td>
+              <td className="py-2 text-right text-red-600">{g.Fwd||0}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+// ── Bench Timeline ────────────────────────────────────────────────────────────
+function BenchTimeline({players, plan}) {
+  const {periods, nonGkPos, periodGK, asgn, halfTime} = plan;
+  const gameMins = periods[periods.length-1].end;
+
+  // For each player, figure out which periods they're on/off
+  const playerPeriods = {};
+  players.forEach(p => { playerPeriods[p.id] = Array(periods.length).fill(null); });
+  periods.forEach((_,pi) => { playerPeriods[periodGK[pi].id][pi] = "GK"; });
+  nonGkPos.forEach((pos, posIdx) => {
+    periods.forEach((_,pi) => {
+      const p = asgn[posIdx][pi];
+      if (p) playerPeriods[p.id][pi] = pos;
+    });
+  });
+
+  const colorFor = pos => {
+    if (!pos) return "#e5e7eb";
+    const g = getGroup(pos);
+    return {GK:"#fde68a", Back:"#bfdbfe", Mid:"#bbf7d0", Fwd:"#fecaca"}[g]||"#e5e7eb";
+  };
+
+  return (
+    <div className="space-y-2">
+      {players.map(p => (
+        <div key={p.id} className="flex items-center gap-3">
+          <span className="text-xs font-medium w-20 text-right flex-shrink-0 truncate text-gray-700">{p.name}</span>
+          <div className="flex flex-1 rounded overflow-hidden" style={{height:"22px"}}>
+            {periods.map((period, pi) => {
+              const posAtPeriod = playerPeriods[p.id][pi];
+              const widthPct = (period.dur / gameMins) * 100;
+              const isBench = !posAtPeriod;
+              return (
+                <div
+                  key={pi}
+                  title={posAtPeriod ? `${p.name}: ${posAtPeriod} (${period.start}–${period.end}′)` : `${p.name}: Bench (${period.start}–${period.end}′)`}
+                  style={{
+                    width:`${widthPct}%`,
+                    background: colorFor(posAtPeriod),
+                    borderLeft: period.start===halfTime ? "2px dashed #9ca3af" : pi>0 ? "1px solid white" : "none",
+                    display:"flex", alignItems:"center", justifyContent:"center",
+                    fontSize:"9px", fontWeight:600,
+                    color: isBench ? "#9ca3af" : "#374151",
+                  }}
+                >
+                  {posAtPeriod || (period.dur >= 15 ? "BENCH" : "")}
+                </div>
+              );
+            })}
+          </div>
+          <span className="text-xs text-gray-400 w-8 text-right flex-shrink-0">
+            {players.reduce((sum,_) => sum, 0), (plan.playerMins[p.id]||0)}′
+          </span>
+        </div>
+      ))}
+      <div className="flex items-center gap-3">
+        <span className="w-20"/>
+        <div className="flex flex-1 text-xs text-gray-400">
+          {periods.map((period,pi) => (
+            <span key={pi} style={{width:`${(period.dur/gameMins)*100}%`, display:"block", textAlign:"center", fontSize:"9px"}}>
+              {period.start}′
+            </span>
+          ))}
+          <span style={{fontSize:"9px"}}>{gameMins}′</span>
+        </div>
+      </div>
+      <div className="flex gap-4 text-xs text-gray-500 mt-1 flex-wrap">
+        {["GK","Back","Mid","Fwd"].map(g => (
+          <span key={g} className="flex items-center gap-1">
+            <span className="w-3 h-3 rounded-sm inline-block" style={{background:{GK:"#fde68a",Back:"#bfdbfe",Mid:"#bbf7d0",Fwd:"#fecaca"}[g]}}/>
+            {g}
+          </span>
+        ))}
+        <span className="flex items-center gap-1">
+          <span className="w-3 h-3 rounded-sm inline-block" style={{background:"#e5e7eb"}}/>
+          Bench
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ── Plan Display ──────────────────────────────────────────────────────────────
+function PlanDisplay({plan, players, onConfirm, onRegenerate, overrides, onOverride}) {
+  const [view, setView] = useState("subs");
+  const hasOverrides = overrides && Object.keys(overrides).length > 0;
+  return (
+    <div className="space-y-4">
+      {/* GK banner */}
+      <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 flex gap-6 text-sm">
+        <div>
+          <span className="text-gray-500 text-xs block">1st Half GK</span>
+          <span className="font-semibold text-amber-700">{plan.gk1.name}</span>
+        </div>
+        <div>
+          <span className="text-gray-500 text-xs block">2nd Half GK</span>
+          <span className="font-semibold text-amber-700">
+            {plan.gk2.id===plan.gk1.id ? `${plan.gk2.name} (same)` : plan.gk2.name}
+          </span>
+        </div>
+        <div className="ml-auto text-right">
+          <span className="text-gray-400 text-xs block">Players</span>
+          <span className="font-semibold">{players.length}</span>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="bg-white border rounded-lg overflow-hidden">
+        <div className="border-b flex">
+          {[["subs","Substitutions"],["grid","Schedule"],["timeline","Timeline"],["mins","Minutes"]].map(([v,label]) => (
+            <button
+              key={v}
+              onClick={()=>setView(v)}
+              className={`flex-1 py-2.5 text-xs font-medium border-r last:border-0 ${
+                view===v ? "border-b-2 border-gray-900 text-gray-900 bg-gray-50" : "text-gray-500 hover:text-gray-700 hover:bg-gray-50"
+              }`}
+            >{label}</button>
+          ))}
+        </div>
+        <div className="p-4">
+          {view==="subs"      && <SubEvents subs={plan.subs} halfTime={plan.halfTime}/>}
+          {view==="grid"      && <PeriodGrid plan={plan} overrides={overrides} onOverride={onOverride} allPlayers={players}/>}
+          {view==="timeline"  && <BenchTimeline players={players} plan={plan}/>}
+          {view==="mins"      && <MinutesTable players={players} plan={plan}/>}
+        </div>
+      </div>
+
+      {/* Actions */}
+      {hasOverrides && (
+        <div className="bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2 flex items-center justify-between text-xs">
+          <span className="text-indigo-700">🔒 {Object.keys(overrides).length} manual override{Object.keys(overrides).length!==1?"s":""} active</span>
+          <button className="text-indigo-500 underline hover:text-indigo-700" onClick={()=>onOverride(null,null,null,true)}>
+            Clear all
+          </button>
+        </div>
+      )}
+      <div className="flex gap-3">
+        <button
+          className="flex-1 border border-gray-300 text-gray-700 py-2.5 rounded-lg text-sm font-medium hover:bg-gray-50"
+          onClick={onRegenerate}
+        >↻ Regenerate</button>
+        <button
+          className="flex-1 bg-gray-900 text-white py-2.5 rounded-lg text-sm font-medium hover:bg-gray-700"
+          onClick={onConfirm}
+        >Save to Season ✓</button>
+      </div>
+    </div>
+  );
+}
+
+// ── New Game Tab ──────────────────────────────────────────────────────────────
+function NewGameTab({players, seasonHistory, onConfirm, formation, onFormationChange}) {
+  const [gameMins, setGameMins] = useState(40);
+  const [subInput, setSubInput] = useState("");
+  const [excludedIds, setExcludedIds] = useState(new Set());
+  const [plan, setPlan] = useState(null);
+  const [saved, setSaved] = useState(false);
+  const [overrides, setOverrides] = useState({}); // key: "posIdx-pi", value: playerId
+
+  const availablePlayers = players.filter(p=>!excludedIds.has(p.id));
+
+  // Auto-suggest sub windows when player count changes
+  useEffect(() => {
+    const suggestion = SUB_SUGGESTIONS[availablePlayers.length];
+    if (suggestion !== undefined) {
+      setSubInput(suggestion);
+      setPlan(null);
+    }
+  }, [availablePlayers.length]);
+
+  function togglePlayer(id) {
+    setExcludedIds(prev => { const n=new Set(prev); n.has(id)?n.delete(id):n.add(id); return n; });
+    setPlan(null); setSaved(false);
+  }
+
+  function parseSubTimes() {
+    return subInput.split(",").map(s=>parseInt(s.trim())).filter(t=>!isNaN(t)&&t>0&&t<gameMins);
+  }
+
+  function overrideList(ovr) {
+    return Object.entries(ovr).map(([key, playerId]) => {
+      const [posIdx, pi] = key.split('-').map(Number);
+      return {posIdx, pi, playerId};
+    });
+  }
+
+  function generate() {
+    setSaved(false);
+    setOverrides({});
+    setPlan(generatePlan(availablePlayers, formation, gameMins, parseSubTimes(), seasonHistory, []));
+  }
+
+  function applyOverride(posIdx, pi, playerId, clearAll) {
+    if (clearAll) {
+      setOverrides({});
+      setPlan(generatePlan(availablePlayers, formation, gameMins, parseSubTimes(), seasonHistory, []));
+      return;
+    }
+    const key = `${posIdx}-${pi}`;
+    const next = {...overrides};
+    if (playerId === null) { delete next[key]; } else { next[key] = playerId; }
+    setOverrides(next);
+    setPlan(generatePlan(availablePlayers, formation, gameMins, parseSubTimes(), seasonHistory, overrideList(next)));
+  }
+
+  function confirm() {
+    if (!plan) return;
+    onConfirm(plan, availablePlayers);
+    setPlan(null); setSaved(true); setOverrides({});
+  }
+
+  return (
+    <div className="space-y-4">
+      {saved && (
+        <div className="bg-green-50 border border-green-200 text-green-800 rounded-lg p-3 text-sm font-medium">
+          ✓ Game saved to season history.
+        </div>
+      )}
+
+      {/* Config */}
+      <div className="bg-white border rounded-lg p-4 space-y-3">
+        <h2 className="font-semibold">Game Settings</h2>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-gray-500 text-xs mb-1">Formation</label>
+            <select
+              className="w-full border rounded px-2 py-2 text-sm focus:outline-none"
+              value={formation}
+              onChange={e=>{onFormationChange(e.target.value);setPlan(null);}}
+            >
+              {Object.keys(FORMATIONS).map(f=><option key={f}>{f}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-gray-500 text-xs mb-1">Duration (mins)</label>
+            <input
+              type="number"
+              className="w-full border rounded px-2 py-2 text-sm focus:outline-none"
+              value={gameMins} min={20} max={120} step={5}
+              onChange={e=>{setGameMins(Number(e.target.value));setPlan(null);}}
+            />
+          </div>
+        </div>
+        <div>
+          <label className="block text-gray-500 text-xs mb-1 flex items-center gap-2">
+            Sub windows (minutes, comma-separated)
+            {SUB_SUGGESTIONS[availablePlayers.length] !== undefined && (
+              <span className="bg-blue-50 border border-blue-200 text-blue-600 px-1.5 py-0.5 rounded text-xs font-medium">
+                suggested for {availablePlayers.length} players
+              </span>
+            )}
+          </label>
+          <input
+            className="w-full border rounded px-2 py-2 text-sm focus:outline-none"
+            placeholder="e.g. 10,30 for two extra sub windows"
+            value={subInput}
+            onChange={e=>{setSubInput(e.target.value);setPlan(null);}}
+          />
+          <p className="text-xs text-gray-400 mt-1">
+            Halftime ({gameMins/2}′) always included. GK only rotates at halftime.
+          </p>
+        </div>
+      </div>
+
+      {/* Player selector */}
+      <div className="bg-white border rounded-lg p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-semibold">
+            Available <span className="font-normal text-gray-400 text-sm">({availablePlayers.length} selected)</span>
+          </h2>
+          {players.length>0&&(
+            <button className="text-xs text-gray-400 underline" onClick={()=>{setExcludedIds(new Set());setPlan(null);}}>
+              Select all
+            </button>
+          )}
+        </div>
+        {players.length<7
+          ? <p className="text-sm text-gray-400">Add at least 7 players in the Squad tab.</p>
+          : (
+            <div className="grid grid-cols-2 gap-y-1.5 gap-x-4 text-sm">
+              {players.map(p=>(
+                <label key={p.id} className="flex items-center gap-2 cursor-pointer hover:bg-gray-50 rounded px-1 py-0.5">
+                  <input type="checkbox" checked={!excludedIds.has(p.id)} onChange={()=>togglePlayer(p.id)} className="rounded"/>
+                  <span className="flex-1 truncate">{p.name}</span>
+                </label>
+              ))}
+            </div>
+          )
+        }
+      </div>
+
+      {availablePlayers.length>=7&&!plan&&(
+        <button
+          className="w-full bg-gray-900 text-white py-3 rounded-lg font-semibold hover:bg-gray-700 text-sm"
+          onClick={generate}
+        >Generate Plan</button>
+      )}
+
+      {plan&&(
+        <PlanDisplay plan={plan} players={availablePlayers} onConfirm={confirm} onRegenerate={generate} overrides={overrides} onOverride={applyOverride}/>
+      )}
+    </div>
+  );
+}
+
+// ── Season Tab ────────────────────────────────────────────────────────────────
+function SeasonTab({players, seasonHistory, games, onUndo}) {
+  const sorted = [...players].sort((a,b)=>(seasonHistory[b.id]?.totalMins||0)-(seasonHistory[a.id]?.totalMins||0));
+  const gkQueue = [...players].sort((a,b)=>(seasonHistory[a.id]?.gkMins||0)-(seasonHistory[b.id]?.gkMins||0));
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <p className="text-sm text-gray-500">{games.length} game{games.length!==1?"s":""} recorded</p>
+        {games.length>0&&(
+          <button className="text-xs text-red-400 underline hover:text-red-600" onClick={onUndo}>
+            Undo last game
+          </button>
+        )}
+      </div>
+
+      {/* Season stats */}
+      <div className="bg-white border rounded-lg p-4 overflow-x-auto">
+        <h2 className="font-semibold mb-3">Season Minutes</h2>
+        {players.length===0
+          ? <p className="text-sm text-gray-400 text-center py-6">No players yet.</p>
+          : (
+            <table className="w-full text-sm" style={{minWidth:"420px"}}>
+              <thead>
+                <tr className="text-xs text-gray-500 border-b">
+                  <th className="text-left pb-2 font-medium">Player</th>
+                  <th className="text-right pb-2 font-medium">Games</th>
+                  <th className="text-right pb-2 font-medium">Total</th>
+                  <th className="text-right pb-2 font-medium text-amber-600">GK</th>
+                  <th className="text-right pb-2 font-medium text-blue-600">Back</th>
+                  <th className="text-right pb-2 font-medium text-green-600">Mid</th>
+                  <th className="text-right pb-2 font-medium text-red-600">Fwd</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.map(p=>{
+                  const h=seasonHistory[p.id]||{};
+                  return (
+                    <tr key={p.id} className="border-b last:border-0">
+                      <td className="py-2 font-medium">{p.name}</td>
+                      <td className="py-2 text-right text-gray-500">{h.games||0}</td>
+                      <td className="py-2 text-right font-bold">{h.totalMins||0}</td>
+                      <td className="py-2 text-right text-amber-600">{h.gkMins||0}</td>
+                      <td className="py-2 text-right text-blue-600">{h.BackMins||0}</td>
+                      <td className="py-2 text-right text-green-600">{h.MidMins||0}</td>
+                      <td className="py-2 text-right text-red-600">{h.FwdMins||0}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )
+        }
+      </div>
+
+      {/* GK rotation */}
+      {players.length>0&&(
+        <div className="bg-white border rounded-lg p-4">
+          <h2 className="font-semibold mb-1">GK Rotation</h2>
+          <p className="text-xs text-gray-400 mb-3">Ordered by fewest GK minutes — next picks at top</p>
+          <div className="space-y-2">
+            {gkQueue.map((p,i)=>(
+              <div key={p.id} className="flex items-center gap-3 text-sm">
+                <span className={`w-5 text-center text-xs font-bold ${i<2?"text-amber-600":"text-gray-300"}`}>{i+1}</span>
+                <span className="flex-1">{p.name}</span>
+                <span className="text-xs text-gray-400">{seasonHistory[p.id]?.gkMins||0}′ GK</span>
+                {i<2&&<span className="text-xs bg-amber-50 border border-amber-200 text-amber-700 px-2 py-0.5 rounded-full">Next up</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Past games */}
+      {games.length>0&&(
+        <div className="bg-white border rounded-lg p-4">
+          <h2 className="font-semibold mb-3">Past Games</h2>
+          <div className="space-y-2">
+            {[...games].reverse().map((g,i)=>(
+              <div key={g.id} className="flex items-center gap-3 text-sm border-b last:border-0 pb-2 last:pb-0">
+                <span className="text-gray-400 text-xs">{games.length-i}</span>
+                <span className="flex-1 font-medium">{g.date}</span>
+                <span className="text-gray-500 text-xs">{g.plan.formation}</span>
+                <span className="text-xs text-amber-600">
+                  GK {g.plan.gk1.name} / {g.plan.gk2.id===g.plan.gk1.id?"same":g.plan.gk2.name}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── PERSISTENCE ─────────────────────────────────────────────────────────────
+const LS = "sub-planner-v1";
+function lsGet(key, fallback) {
+  try { const v = JSON.parse(localStorage.getItem(LS + "." + key)); return v !== null ? v : fallback; } catch { return fallback; }
+}
+function lsSet(key, val) { try { localStorage.setItem(LS + "." + key, JSON.stringify(val)); } catch {} }
+
+// ─── APP ─────────────────────────────────────────────────────────────────────
+function App() {
+  const [players, setPlayers] = useState(() => {
+    const p = lsGet("players", []);
+    // Restore uid counter past any saved ids so new ids don't collide
+    p.forEach(pl => { const n = parseInt(pl.id) || 0; if (n >= _id) _id = n + 1; });
+    return p;
+  });
+  const [seasonHistory, setSeasonHistory] = useState(() => lsGet("history", {}));
+  const [games, setGames] = useState(() => {
+    const g = lsGet("games", []);
+    // Also restore uid past game ids
+    g.forEach(gm => { const n = parseInt(gm.id) || 0; if (n >= _id) _id = n + 1; });
+    return g;
+  });
+  const [formation, setFormation] = useState(() => lsGet("formation", "2-3-1"));
+  const [tab, setTab] = useState("players");
+
+  useEffect(() => { lsSet("players", players); }, [players]);
+  useEffect(() => { lsSet("history", seasonHistory); }, [seasonHistory]);
+  useEffect(() => { lsSet("games", games); }, [games]);
+  useEffect(() => { lsSet("formation", formation); }, [formation]);
+
+  function addPlayer(name) {
+    setPlayers(prev=>[...prev, {id:uid(), name}]);
+  }
+  function removePlayer(id) {
+    setPlayers(prev=>prev.filter(p=>p.id!==id));
+    setSeasonHistory(prev=>{ const n={...prev}; delete n[id]; return n; });
+  }
+  function confirmGame(plan, gamePlayers) {
+    setSeasonHistory(prev=>mergeHistory(prev, plan, gamePlayers));
+    setGames(prev=>[...prev, {id:uid(), date:new Date().toLocaleDateString(), plan, players:gamePlayers}]);
+  }
+  function undoLastGame() {
+    if (!games.length) return;
+    const remaining = games.slice(0,-1);
+    let hist={};
+    remaining.forEach(g=>{ hist=mergeHistory(hist, g.plan, g.players); });
+    setSeasonHistory(hist);
+    setGames(remaining);
+  }
+
+  const TABS = [{id:"players",label:"Squad"},{id:"game",label:"New Game"},{id:"season",label:"Season"}];
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <header className="bg-white border-b sticky top-0 z-10">
+        <div className="max-w-2xl mx-auto px-4 py-3 flex items-center justify-between">
+          <span className="font-bold text-sm tracking-tight">⚽ Sub Planner</span>
+          <nav className="flex gap-1">
+            {TABS.map(t=>(
+              <button
+                key={t.id}
+                onClick={()=>setTab(t.id)}
+                className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
+                  tab===t.id ? "bg-gray-900 text-white" : "text-gray-500 hover:bg-gray-100 hover:text-gray-900"
+                }`}
+              >{t.label}</button>
+            ))}
+          </nav>
+        </div>
+      </header>
+      <main className="max-w-2xl mx-auto px-4 py-5">
+        {tab==="players"&&<PlayersTab players={players} onAdd={addPlayer} onRemove={removePlayer}/>}
+        {tab==="game"&&<NewGameTab players={players} seasonHistory={seasonHistory} onConfirm={confirmGame} formation={formation} onFormationChange={setFormation}/>}
+        {tab==="season"&&<SeasonTab players={players} seasonHistory={seasonHistory} games={games} onUndo={undoLastGame}/>}
+      </main>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
