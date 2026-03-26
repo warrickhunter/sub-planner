@@ -11,6 +11,14 @@
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
   * { box-sizing: border-box; }
+  @media screen { .print-only { display: none !important; } }
+  @media print {
+    .no-print { display: none !important; }
+    .print-only { display: block !important; }
+    body, .bg-gray-50, .bg-white, [class*="bg-"] { background: white !important; }
+    [class*="border"] { border-color: #e5e7eb !important; }
+    * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+  }
 </style>
 </head>
 <body class="bg-gray-50">
@@ -704,6 +712,109 @@ function BenchTimeline({players, plan}) {
   );
 }
 
+// ── Print: Substitutions ─────────────────────────────────────────────────────
+function PrintSubEvents({plan}) {
+  const {subs, halfTime, periods, nonGkPos, periodGK, asgn} = plan;
+  const halfPi = periods.findIndex(p => p.start === halfTime);
+  const allTimes = [...new Set(subs.map(s => s.time))].sort((a,b) => a-b);
+  if (!allTimes.length) return <p style={{fontSize:"12px",color:"#6b7280"}}>No substitutions.</p>;
+  const groupColor = g => ({GK:"#b45309",Back:"#1d4ed8",Mid:"#15803d",Fwd:"#b91c1c"}[g]);
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:"10px"}}>
+      {allTimes.map(time => {
+        const isHalf = time === halfTime;
+        const timeSubs = subs.filter(s => s.time === time);
+        const heading = (
+          <div style={{fontWeight:"700",fontSize:"11px",borderBottom:"1px solid #e5e7eb",paddingBottom:"3px",marginBottom:"5px"}}>
+            {time}′{isHalf ? " — Halftime — Full second-half lineup" : ""}
+          </div>
+        );
+        if (isHalf) {
+          const halfGK = periodGK[halfPi];
+          return (
+            <div key={time}>
+              {heading}
+              <div style={{display:"flex",flexDirection:"column",gap:"2px"}}>
+                <div style={{display:"flex",gap:"10px",fontSize:"11px"}}>
+                  <span style={{width:"30px",fontWeight:"600",color:groupColor("GK")}}>GK</span>
+                  <span style={{fontWeight:"500"}}>{halfGK.name}</span>
+                </div>
+                {nonGkPos.map((pos,posIdx) => {
+                  const player = asgn[posIdx][halfPi];
+                  return (
+                    <div key={posIdx} style={{display:"flex",gap:"10px",fontSize:"11px"}}>
+                      <span style={{width:"30px",fontWeight:"600",color:groupColor(getGroup(pos))}}>{pos}</span>
+                      <span style={{fontWeight:"500"}}>{player?.name||"?"}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        }
+        return (
+          <div key={time}>
+            {heading}
+            <div style={{display:"flex",flexDirection:"column",gap:"2px"}}>
+              {timeSubs.map((s,i) => (
+                <div key={i} style={{display:"flex",gap:"10px",fontSize:"11px",alignItems:"center"}}>
+                  <span style={{width:"30px",fontWeight:"600",color:groupColor(getGroup(s.pos))}}>{s.pos}</span>
+                  <span style={{color:"#9ca3af",textDecoration:"line-through"}}>{s.off?.name}</span>
+                  <span style={{color:"#d1d5db"}}>→</span>
+                  <span style={{fontWeight:"500"}}>{s.on?.name}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Print: Full View ──────────────────────────────────────────────────────────
+function PrintView({plan, players}) {
+  const gameMins = plan.periods[plan.periods.length-1].end;
+  const section = label => (
+    <div style={{fontWeight:"700",fontSize:"10px",textTransform:"uppercase",letterSpacing:"0.06em",color:"#6b7280",marginBottom:"6px"}}>
+      {label}
+    </div>
+  );
+  return (
+    <div className="print-only" style={{padding:"12px 16px"}}>
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",borderBottom:"2px solid #111",paddingBottom:"6px",marginBottom:"14px"}}>
+        <span style={{fontWeight:"700",fontSize:"15px"}}>⚽ Sub Plan</span>
+        <span style={{fontSize:"11px",color:"#6b7280"}}>
+          {plan.formation} · {gameMins}′ · {players.length} players
+        </span>
+      </div>
+      {/* GK row */}
+      <div style={{fontSize:"12px",marginBottom:"14px"}}>
+        <span style={{color:"#b45309",fontWeight:"600"}}>GK — </span>
+        1st half: <strong>{plan.gk1.name}</strong>
+        {" · "}
+        2nd half: <strong>{plan.gk2.id===plan.gk1.id ? plan.gk1.name+" (same)" : plan.gk2.name}</strong>
+      </div>
+      {/* Substitutions */}
+      <div style={{marginBottom:"18px"}}>
+        {section("Substitutions")}
+        <PrintSubEvents plan={plan} />
+      </div>
+      {/* Schedule */}
+      <div style={{marginBottom:"18px"}}>
+        {section("Schedule")}
+        <PeriodGrid plan={plan} overrides={{}} onOverride={()=>{}} allPlayers={[]} />
+      </div>
+      {/* Timeline — kept on a single page */}
+      <div style={{breakInside:"avoid", pageBreakInside:"avoid"}}>
+        {section("Timeline")}
+        <BenchTimeline players={players} plan={plan} />
+      </div>
+    </div>
+  );
+}
+
 // ── Plan Display ──────────────────────────────────────────────────────────────
 function PlanDisplay({plan, players, onConfirm, onRegenerate, overrides, onOverride}) {
   const [view, setView] = useState("subs");
@@ -711,7 +822,7 @@ function PlanDisplay({plan, players, onConfirm, onRegenerate, overrides, onOverr
   return (
     <div className="space-y-4">
       {/* GK banner */}
-      <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 flex gap-6 text-sm">
+      <div className="no-print bg-amber-50 border border-amber-200 rounded-lg p-3 flex gap-6 text-sm">
         <div>
           <span className="text-gray-500 text-xs block">1st Half GK</span>
           <span className="font-semibold text-amber-700">{plan.gk1.name}</span>
@@ -729,7 +840,7 @@ function PlanDisplay({plan, players, onConfirm, onRegenerate, overrides, onOverr
       </div>
 
       {/* Tabs */}
-      <div className="bg-white border rounded-lg overflow-hidden">
+      <div className="no-print bg-white border rounded-lg overflow-hidden">
         <div className="border-b flex">
           {[["subs","Substitutions"],["grid","Schedule"],["timeline","Timeline"],["mins","Minutes"]].map(([v,label]) => (
             <button
@@ -751,23 +862,31 @@ function PlanDisplay({plan, players, onConfirm, onRegenerate, overrides, onOverr
 
       {/* Actions */}
       {hasOverrides && (
-        <div className="bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2 flex items-center justify-between text-xs">
+        <div className="no-print bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2 flex items-center justify-between text-xs">
           <span className="text-indigo-700">🔒 {Object.keys(overrides).length} manual override{Object.keys(overrides).length!==1?"s":""} active</span>
           <button className="text-indigo-500 underline hover:text-indigo-700" onClick={()=>onOverride(null,null,null,true)}>
             Clear all
           </button>
         </div>
       )}
-      <div className="flex gap-3">
+      <div className="no-print flex gap-3">
         <button
           className="flex-1 border border-gray-300 text-gray-700 py-2.5 rounded-lg text-sm font-medium hover:bg-gray-50"
           onClick={onRegenerate}
         >↻ Regenerate</button>
         <button
+          className="border border-gray-300 text-gray-700 px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-gray-50"
+          onClick={()=>window.print()}
+          title="Print plan"
+        >🖨</button>
+        <button
           className="flex-1 bg-gray-900 text-white py-2.5 rounded-lg text-sm font-medium hover:bg-gray-700"
           onClick={onConfirm}
         >Save to Season ✓</button>
       </div>
+
+      {/* Print-only view — hidden on screen, shown when printing */}
+      <PrintView plan={plan} players={players} />
     </div>
   );
 }
@@ -842,7 +961,7 @@ function NewGameTab({players, seasonHistory, onConfirm, formation, onFormationCh
       )}
 
       {/* Config */}
-      <div className="bg-white border rounded-lg p-4 space-y-3">
+      <div className="no-print bg-white border rounded-lg p-4 space-y-3">
         <h2 className="font-semibold">Game Settings</h2>
         <div className="grid grid-cols-2 gap-3">
           <div>
@@ -887,7 +1006,7 @@ function NewGameTab({players, seasonHistory, onConfirm, formation, onFormationCh
       </div>
 
       {/* Player selector */}
-      <div className="bg-white border rounded-lg p-4">
+      <div className="no-print bg-white border rounded-lg p-4">
         <div className="flex items-center justify-between mb-3">
           <h2 className="font-semibold">
             Available <span className="font-normal text-gray-400 text-sm">({availablePlayers.length} selected)</span>
@@ -1076,7 +1195,7 @@ function App() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      <header className="bg-white border-b sticky top-0 z-10">
+      <header className="no-print bg-white border-b sticky top-0 z-10">
         <div className="max-w-2xl mx-auto px-4 py-3 flex items-center justify-between">
           <span className="font-bold text-sm tracking-tight">⚽ Sub Planner</span>
           <nav className="flex gap-1">
