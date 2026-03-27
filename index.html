@@ -8,6 +8,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
 <script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
   * { box-sizing: border-box; }
@@ -1148,6 +1149,33 @@ function lsGet(key, fallback) {
 }
 function lsSet(key, val) { try { localStorage.setItem(LS + "." + key, JSON.stringify(val)); } catch {} }
 
+// ─── CLOUD SYNC (SUPABASE) ──────────────────────────────────────────────────
+const SUPABASE_URL = "https://qmpahtsofuucrjttlkat.supabase.co";
+const SUPABASE_ANON = "sb_publishable_pl0DN5IzcprkdruwkrqhPg_6E7HLiLH";
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+
+function getSeasonFromUrl() {
+  return new URLSearchParams(window.location.search).get("season");
+}
+
+async function cloudSave(code, data) {
+  const { error } = await sb.from("seasons").upsert({
+    code,
+    data,
+    updated_at: new Date().toISOString(),
+  });
+  if (error) throw error;
+}
+
+async function cloudLoad(code) {
+  const { data, error } = await sb.from("seasons")
+    .select("data")
+    .eq("code", code)
+    .single();
+  if (error) throw error;
+  return data.data;
+}
+
 // ─── APP ─────────────────────────────────────────────────────────────────────
 function App() {
   const [players, setPlayers] = useState(() => {
@@ -1165,11 +1193,53 @@ function App() {
   });
   const [formation, setFormation] = useState(() => lsGet("formation", "2-3-1"));
   const [tab, setTab] = useState("players");
+  const [seasonCode, setSeasonCode] = useState(() => getSeasonFromUrl() || lsGet("seasonCode", ""));
+  const [syncStatus, setSyncStatus] = useState("");
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => { lsSet("players", players); }, [players]);
   useEffect(() => { lsSet("history", seasonHistory); }, [seasonHistory]);
   useEffect(() => { lsSet("games", games); }, [games]);
   useEffect(() => { lsSet("formation", formation); }, [formation]);
+  useEffect(() => { lsSet("seasonCode", seasonCode); }, [seasonCode]);
+
+  useEffect(() => {
+    if (syncStatus === "saved" || syncStatus === "loaded") {
+      const t = setTimeout(() => setSyncStatus(""), 2000);
+      return () => clearTimeout(t);
+    }
+  }, [syncStatus]);
+
+  useEffect(() => {
+    if (copied) {
+      const t = setTimeout(() => setCopied(false), 2000);
+      return () => clearTimeout(t);
+    }
+  }, [copied]);
+
+  useEffect(() => {
+    const urlCode = getSeasonFromUrl();
+    if (!urlCode) return;
+    setSyncStatus("loading");
+    cloudLoad(urlCode)
+      .then(d => {
+        if (d.players) {
+          d.players.forEach(pl => { const n = parseInt(pl.id) || 0; if (n >= _id) _id = n + 1; });
+          setPlayers(d.players);
+        }
+        if (d.seasonHistory) setSeasonHistory(d.seasonHistory);
+        if (d.games) {
+          d.games.forEach(gm => { const n = parseInt(gm.id) || 0; if (n >= _id) _id = n + 1; });
+          setGames(d.games);
+        }
+        if (d.formation) setFormation(d.formation);
+        setSeasonCode(urlCode);
+        setSyncStatus("loaded");
+      })
+      .catch(() => {
+        setSyncStatus("error");
+      });
+  }, []);
 
   function addPlayer(name) {
     setPlayers(prev=>[...prev, {id:uid(), name}]);
@@ -1189,6 +1259,20 @@ function App() {
     remaining.forEach(g=>{ hist=mergeHistory(hist, g.plan, g.players); });
     setSeasonHistory(hist);
     setGames(remaining);
+  }
+
+  async function handleCloudSave() {
+    if (!seasonCode.trim()) return;
+    setSyncStatus("saving");
+    try {
+      await cloudSave(seasonCode.trim(), { players, seasonHistory, games, formation });
+      const url = new URL(window.location);
+      url.searchParams.set("season", seasonCode.trim());
+      window.history.replaceState({}, "", url);
+      setSyncStatus("saved");
+    } catch {
+      setSyncStatus("error");
+    }
   }
 
   const TABS = [{id:"players",label:"Squad"},{id:"game",label:"New Game"},{id:"season",label:"Season"}];
@@ -1211,6 +1295,66 @@ function App() {
           </nav>
         </div>
       </header>
+      <div className="no-print bg-white border-b">
+        <div className="max-w-2xl mx-auto px-4 py-2 flex items-center gap-2 text-xs">
+          <input
+            type="text"
+            value={seasonCode}
+            onChange={e => setSeasonCode(e.target.value)}
+            placeholder="Season code e.g. tigers-2026"
+            className="border rounded px-2 py-1 w-44 text-xs"
+          />
+          <button
+            onClick={handleCloudSave}
+            disabled={!seasonCode.trim() || syncStatus === "saving" || syncStatus === "loading"}
+            className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 font-medium whitespace-nowrap"
+          >
+            {syncStatus === "saving" ? "Saving..." : syncStatus === "loading" ? "Loading..." : "Save"}
+          </button>
+          <button
+            onClick={() => {
+              if (!seasonCode.trim()) return;
+              setSyncStatus("loading");
+              cloudLoad(seasonCode.trim())
+                .then(d => {
+                  if (d.players) {
+                    d.players.forEach(pl => { const n = parseInt(pl.id) || 0; if (n >= _id) _id = n + 1; });
+                    setPlayers(d.players);
+                  }
+                  if (d.seasonHistory) setSeasonHistory(d.seasonHistory);
+                  if (d.games) {
+                    d.games.forEach(gm => { const n = parseInt(gm.id) || 0; if (n >= _id) _id = n + 1; });
+                    setGames(d.games);
+                  }
+                  if (d.formation) setFormation(d.formation);
+                  const url = new URL(window.location);
+                  url.searchParams.set("season", seasonCode.trim());
+                  window.history.replaceState({}, "", url);
+                  setSyncStatus("loaded");
+                })
+                .catch(() => setSyncStatus("error"));
+            }}
+            disabled={!seasonCode.trim() || syncStatus === "saving" || syncStatus === "loading"}
+            className="px-3 py-1 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 disabled:opacity-50 font-medium whitespace-nowrap"
+          >
+            Load
+          </button>
+          {syncStatus === "saved" && <span className="text-green-600">Saved!</span>}
+          {syncStatus === "loaded" && <span className="text-green-600">Loaded!</span>}
+          {syncStatus === "error" && <span className="text-red-600">Sync failed</span>}
+          {seasonCode && (
+            <button
+              onClick={() => {
+                navigator.clipboard.writeText(
+                  `${window.location.origin}${window.location.pathname}?season=${encodeURIComponent(seasonCode.trim())}`
+                );
+                setCopied(true);
+              }}
+              className="ml-auto text-gray-400 hover:text-gray-600 whitespace-nowrap"
+            >{copied ? "Copied!" : "Copy link"}</button>
+          )}
+        </div>
+      </div>
       <main className="max-w-2xl mx-auto px-4 py-5">
         {tab==="players"&&<PlayersTab players={players} onAdd={addPlayer} onRemove={removePlayer}/>}
         {tab==="game"&&<NewGameTab players={players} seasonHistory={seasonHistory} onConfirm={confirmGame} formation={formation} onFormationChange={setFormation}/>}
