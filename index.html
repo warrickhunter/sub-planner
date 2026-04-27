@@ -463,31 +463,122 @@ function PlayersTab({players, onAdd, onRemove}) {
 }
 
 // ── Substitution Events ───────────────────────────────────────────────────────
-function SubEvents({subs, halfTime}) {
+function SubEvents({subs, halfTime, plan}) {
   if (!subs.length) return <p className="text-sm text-gray-400">No substitutions — all players stay on for the full game.</p>;
+  const {periods, nonGkPos, periodGK, asgn} = plan;
+  const halfPi = periods.findIndex(p => p.start === halfTime);
   const byTime = {};
   subs.forEach(s => { if (!byTime[s.time]) byTime[s.time]=[]; byTime[s.time].push(s); });
   return (
     <div className="space-y-5">
-      {Object.entries(byTime).sort((a,b)=>Number(a[0])-Number(b[0])).map(([time, timeSubs]) => (
-        <div key={time}>
-          <div className="flex items-center gap-2 mb-2">
-            <span className="bg-gray-800 text-white text-xs font-bold px-2.5 py-1 rounded">{time}′</span>
-            {Number(time)===halfTime && <span className="text-xs font-semibold text-amber-600">Halftime</span>}
-          </div>
-          <div className="space-y-1.5 ml-1 border-l-2 border-gray-100 pl-3">
-            {timeSubs.map((s,i) => (
-              <div key={i} className="flex items-center gap-2 text-sm">
-                <span className={`w-12 text-xs font-semibold flex-shrink-0 ${GTC[getGroup(s.pos)]}`}>{s.pos}</span>
-                <span className="text-gray-400 line-through text-xs">{s.off?.name}</span>
-                <span className="text-gray-300 text-xs">→</span>
-                <span className="font-medium text-gray-900">{s.on?.name}</span>
-                {s.isGK && <Pill group="GK" label="GK" />}
+      {Object.entries(byTime).sort((a,b)=>Number(a[0])-Number(b[0])).map(([time, timeSubs]) => {
+        const isHalf = Number(time) === halfTime;
+
+        // At halftime, show full second-half lineup
+        if (isHalf) {
+          const halfGK = periodGK[halfPi];
+          const allOn = [{player: halfGK, pos: "GK"}];
+          nonGkPos.forEach((pos, posIdx) => {
+            const p = asgn[posIdx][halfPi];
+            if (p) allOn.push({player: p, pos});
+          });
+          return (
+            <div key={time}>
+              <div className="flex items-center gap-2 mb-2">
+                <span className="bg-gray-800 text-white text-xs font-bold px-2.5 py-1 rounded">{time}′</span>
+                <span className="text-xs font-semibold text-amber-600">Halftime</span>
               </div>
-            ))}
+              <div className="ml-1 border-l-2 border-gray-100 pl-3">
+                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">On</span>
+                <div className="mt-0.5 space-y-0.5">
+                  {allOn.map(({player, pos}) => (
+                    <div key={player.id} className="flex items-center gap-1.5 text-sm">
+                      <span className="font-medium text-gray-900">{player.name}</span>
+                      <span className={`text-xs ${GTC[getGroup(pos)]}`}>&#x25B8;</span>
+                      <span className={`text-xs font-semibold ${GTC[getGroup(pos)]}`}>{pos}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          );
+        }
+
+        const offIds = new Set(timeSubs.map(s => s.off?.id).filter(Boolean));
+        const onIds = new Set(timeSubs.map(s => s.on?.id).filter(Boolean));
+        const stayerIds = new Set([...offIds].filter(id => onIds.has(id)));
+        const stayerMoves = {};
+        timeSubs.forEach(s => {
+          if (s.off && stayerIds.has(s.off.id)) {
+            if (!stayerMoves[s.off.id]) stayerMoves[s.off.id] = {name: s.off.name};
+            stayerMoves[s.off.id].from = s.pos;
+          }
+          if (s.on && stayerIds.has(s.on.id)) {
+            if (!stayerMoves[s.on.id]) stayerMoves[s.on.id] = {name: s.on.name};
+            stayerMoves[s.on.id].to = s.pos;
+          }
+        });
+        const offPlayers = [];
+        const seenOff = new Set();
+        timeSubs.forEach(s => {
+          if (s.off && !stayerIds.has(s.off.id) && !seenOff.has(s.off.id)) {
+            seenOff.add(s.off.id);
+            offPlayers.push(s.off);
+          }
+        });
+        const onPlayers = [];
+        const seenOn = new Set();
+        timeSubs.forEach(s => {
+          if (s.on && !stayerIds.has(s.on.id) && !seenOn.has(s.on.id)) {
+            seenOn.add(s.on.id);
+            onPlayers.push({player: s.on, pos: s.pos});
+          }
+        });
+        const stayerList = Object.entries(stayerMoves);
+        return (
+          <div key={time}>
+            <div className="flex items-center gap-2 mb-2">
+              <span className="bg-gray-800 text-white text-xs font-bold px-2.5 py-1 rounded">{time}′</span>
+            </div>
+            <div className="ml-1 border-l-2 border-gray-100 pl-3 space-y-2">
+              {offPlayers.length > 0 && (
+                <div>
+                  <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Off</span>
+                  <div className="mt-0.5 space-y-0.5">
+                    {offPlayers.map(p => (
+                      <div key={p.id} className="text-sm text-gray-500">{p.name}</div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {onPlayers.length > 0 && (
+                <div>
+                  <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">On</span>
+                  <div className="mt-0.5 space-y-0.5">
+                    {onPlayers.map(({player, pos}) => (
+                      <div key={player.id} className="flex items-center gap-1.5 text-sm">
+                        <span className="font-medium text-gray-900">{player.name}</span>
+                        <span className={`text-xs ${GTC[getGroup(pos)]}`}>&#x25B8;</span>
+                        <span className={`text-xs font-semibold ${GTC[getGroup(pos)]}`}>{pos}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {stayerList.length > 0 && (
+                <div>
+                  <span className="text-xs font-semibold text-indigo-500 uppercase tracking-wide">Position change</span>
+                  <div className="mt-0.5 space-y-0.5">
+                    {stayerList.map(([id, m]) => (
+                      <div key={id} className="text-sm text-indigo-600">{m.name} <span className="text-xs">({m.from} → {m.to})</span></div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -731,42 +822,93 @@ function PrintSubEvents({plan}) {
         );
         if (isHalf) {
           const halfGK = periodGK[halfPi];
+          const allOn = [{player: halfGK, pos: "GK"}];
+          nonGkPos.forEach((pos, posIdx) => {
+            const p = asgn[posIdx][halfPi];
+            if (p) allOn.push({player: p, pos});
+          });
           return (
             <div key={time}>
               {heading}
               <div style={{display:"flex",flexDirection:"column",gap:"2px"}}>
-                <div style={{display:"flex",gap:"10px",fontSize:"11px"}}>
-                  <span style={{width:"30px",fontWeight:"600",color:groupColor("GK")}}>GK</span>
-                  <span style={{fontWeight:"500"}}>{halfGK.name}</span>
-                </div>
-                {nonGkPos.map((pos,posIdx) => {
-                  const player = asgn[posIdx][halfPi];
-                  return (
-                    <div key={posIdx} style={{display:"flex",gap:"10px",fontSize:"11px"}}>
-                      <span style={{width:"30px",fontWeight:"600",color:groupColor(getGroup(pos))}}>{pos}</span>
-                      <span style={{fontWeight:"500"}}>{player?.name||"?"}</span>
-                    </div>
-                  );
-                })}
+                <div style={{fontSize:"9px",fontWeight:"700",textTransform:"uppercase",letterSpacing:"0.05em",color:"#6b7280"}}>On</div>
+                {allOn.map(({player, pos}) => (
+                  <div key={player.id} style={{display:"flex",gap:"4px",fontSize:"11px",alignItems:"center"}}>
+                    <span style={{fontWeight:"500"}}>{player.name}</span>
+                    <span style={{color:groupColor(getGroup(pos)),fontSize:"10px"}}>{"\u25B8"}</span>
+                    <span style={{fontWeight:"600",color:groupColor(getGroup(pos))}}>{pos}</span>
+                  </div>
+                ))}
               </div>
             </div>
           );
         }
-        return (
-          <div key={time}>
-            {heading}
-            <div style={{display:"flex",flexDirection:"column",gap:"2px"}}>
-              {timeSubs.map((s,i) => (
-                <div key={i} style={{display:"flex",gap:"10px",fontSize:"11px",alignItems:"center"}}>
-                  <span style={{width:"30px",fontWeight:"600",color:groupColor(getGroup(s.pos))}}>{s.pos}</span>
-                  <span style={{color:"#9ca3af",textDecoration:"line-through"}}>{s.off?.name}</span>
-                  <span style={{color:"#d1d5db"}}>→</span>
-                  <span style={{fontWeight:"500"}}>{s.on?.name}</span>
-                </div>
-              ))}
+        {
+          const offIds = new Set(timeSubs.map(s => s.off?.id).filter(Boolean));
+          const onIds = new Set(timeSubs.map(s => s.on?.id).filter(Boolean));
+          const stayerIds = new Set([...offIds].filter(id => onIds.has(id)));
+          const stayerMoves = {};
+          timeSubs.forEach(s => {
+            if (s.off && stayerIds.has(s.off.id)) {
+              if (!stayerMoves[s.off.id]) stayerMoves[s.off.id] = {name: s.off.name};
+              stayerMoves[s.off.id].from = s.pos;
+            }
+            if (s.on && stayerIds.has(s.on.id)) {
+              if (!stayerMoves[s.on.id]) stayerMoves[s.on.id] = {name: s.on.name};
+              stayerMoves[s.on.id].to = s.pos;
+            }
+          });
+          const offPlayers = [];
+          const seenOff = new Set();
+          timeSubs.forEach(s => {
+            if (s.off && !stayerIds.has(s.off.id) && !seenOff.has(s.off.id)) {
+              seenOff.add(s.off.id); offPlayers.push(s.off);
+            }
+          });
+          const onPlayers = [];
+          const seenOn = new Set();
+          timeSubs.forEach(s => {
+            if (s.on && !stayerIds.has(s.on.id) && !seenOn.has(s.on.id)) {
+              seenOn.add(s.on.id); onPlayers.push({player: s.on, pos: s.pos});
+            }
+          });
+          const stayerList = Object.entries(stayerMoves);
+          return (
+            <div key={time}>
+              {heading}
+              <div style={{display:"flex",flexDirection:"column",gap:"4px"}}>
+                {offPlayers.length > 0 && (
+                  <div>
+                    <div style={{fontSize:"9px",fontWeight:"700",textTransform:"uppercase",letterSpacing:"0.05em",color:"#6b7280"}}>Off</div>
+                    {offPlayers.map(p => (
+                      <div key={p.id} style={{fontSize:"11px",color:"#6b7280"}}>{p.name}</div>
+                    ))}
+                  </div>
+                )}
+                {onPlayers.length > 0 && (
+                  <div>
+                    <div style={{fontSize:"9px",fontWeight:"700",textTransform:"uppercase",letterSpacing:"0.05em",color:"#6b7280"}}>On</div>
+                    {onPlayers.map(({player, pos}) => (
+                      <div key={player.id} style={{display:"flex",gap:"4px",fontSize:"11px",alignItems:"center"}}>
+                        <span style={{fontWeight:"500"}}>{player.name}</span>
+                        <span style={{color:groupColor(getGroup(pos)),fontSize:"10px"}}>{"\u25B8"}</span>
+                        <span style={{fontWeight:"600",color:groupColor(getGroup(pos))}}>{pos}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {stayerList.length > 0 && (
+                  <div>
+                    <div style={{fontSize:"9px",fontWeight:"700",textTransform:"uppercase",letterSpacing:"0.05em",color:"#4f46e5"}}>Position change</div>
+                    {stayerList.map(([id, m]) => (
+                      <div key={id} style={{fontSize:"11px",color:"#4f46e5"}}>{m.name} ({m.from} → {m.to})</div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        );
+          );
+        }
       })}
     </div>
   );
@@ -853,7 +995,7 @@ function PlanDisplay({plan, players, onConfirm, onRegenerate, overrides, onOverr
           ))}
         </div>
         <div className="p-4">
-          {view==="subs"      && <SubEvents subs={plan.subs} halfTime={plan.halfTime}/>}
+          {view==="subs"      && <SubEvents subs={plan.subs} halfTime={plan.halfTime} plan={plan}/>}
           {view==="grid"      && <PeriodGrid plan={plan} overrides={overrides} onOverride={onOverride} allPlayers={players}/>}
           {view==="timeline"  && <BenchTimeline players={players} plan={plan}/>}
           {view==="mins"      && <MinutesTable players={players} plan={plan}/>}
