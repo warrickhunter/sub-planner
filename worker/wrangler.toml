@@ -1,0 +1,7 @@
+name = "sub-planner-api"
+main = "index.js"
+compatibility_date = "2024-09-23"
+
+[[kv_namespaces]]
+binding = "SEASONS"
+id = "5a6f18eeb2d64f0da025b033ccce4cab"

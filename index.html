@@ -8,7 +8,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.development.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
 <script src="https://cdn.tailwindcss.com"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
   * { box-sizing: border-box; }
@@ -1149,31 +1148,26 @@ function lsGet(key, fallback) {
 }
 function lsSet(key, val) { try { localStorage.setItem(LS + "." + key, JSON.stringify(val)); } catch {} }
 
-// ─── CLOUD SYNC (SUPABASE) ──────────────────────────────────────────────────
-const SUPABASE_URL = "https://qmpahtsofuucrjttlkat.supabase.co";
-const SUPABASE_ANON = "sb_publishable_pl0DN5IzcprkdruwkrqhPg_6E7HLiLH";
-const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+// ─── CLOUD SYNC (CLOUDFLARE WORKER + KV) ────────────────────────────────────
+const WORKER_URL = "https://sub-planner-api.warrick.workers.dev";
 
 function getSeasonFromUrl() {
   return new URLSearchParams(window.location.search).get("season");
 }
 
 async function cloudSave(code, data) {
-  const { error } = await sb.from("seasons").upsert({
-    code,
-    data,
-    updated_at: new Date().toISOString(),
+  const res = await fetch(`${WORKER_URL}/api/season/${encodeURIComponent(code)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
   });
-  if (error) throw error;
+  if (!res.ok) throw new Error(`Save failed: ${res.status}`);
 }
 
 async function cloudLoad(code) {
-  const { data, error } = await sb.from("seasons")
-    .select("data")
-    .eq("code", code)
-    .single();
-  if (error) throw error;
-  return data.data;
+  const res = await fetch(`${WORKER_URL}/api/season/${encodeURIComponent(code)}`);
+  if (!res.ok) throw new Error(`Load failed: ${res.status}`);
+  return res.json();
 }
 
 // ─── APP ─────────────────────────────────────────────────────────────────────
