@@ -30,6 +30,48 @@ export default {
 
     if (request.method === 'PUT') {
       const body = await request.text();
+
+      if (body.length > 1_000_000) {
+        return new Response('Payload too large', { status: 413, headers: CORS });
+      }
+
+      let data;
+      try {
+        data = JSON.parse(body);
+      } catch {
+        return new Response('Invalid JSON', { status: 400, headers: CORS });
+      }
+
+      const invalid = (msg) => new Response(`Invalid data: ${msg}`, { status: 400, headers: CORS });
+
+      if (typeof data !== 'object' || data === null || Array.isArray(data)) {
+        return invalid('root must be an object');
+      }
+
+      const { players, seasonHistory, games, formation } = data;
+
+      if (!Array.isArray(players)) return invalid('players must be an array');
+      if (players.length > 50) return invalid('too many players');
+      for (const p of players) {
+        if (typeof p?.id !== 'string' || typeof p?.name !== 'string') {
+          return invalid('each player must have string id and name');
+        }
+      }
+
+      if (typeof seasonHistory !== 'object' || seasonHistory === null || Array.isArray(seasonHistory)) {
+        return invalid('seasonHistory must be an object');
+      }
+
+      if (!Array.isArray(games)) return invalid('games must be an array');
+      if (games.length > 200) return invalid('too many games');
+      for (const g of games) {
+        if (typeof g?.id !== 'string' || typeof g?.date !== 'string') {
+          return invalid('each game must have string id and date');
+        }
+      }
+
+      if (typeof formation !== 'string') return invalid('formation must be a string');
+
       await env.SEASONS.put(code, body);
       return new Response('OK', { status: 200, headers: CORS });
     }
