@@ -1034,14 +1034,15 @@ function PlanDisplay({plan, players, onConfirm, onRegenerate, overrides, onOverr
 }
 
 // ── New Game Tab ──────────────────────────────────────────────────────────────
-function NewGameTab({players, seasonHistory, onConfirm, formation, onFormationChange}) {
-  const [gameMins, setGameMins] = useState(40);
-  const [subInput, setSubInput] = useState("");
-  const [excludedIds, setExcludedIds] = useState(new Set());
-  const [plan, setPlan] = useState(null);
-  const [saved, setSaved] = useState(false);
-  const [overrides, setOverrides] = useState({}); // key: "posIdx-pi", value: playerId
-
+function NewGameTab({
+  players, seasonHistory, onConfirm, formation, onFormationChange,
+  gameMins, setGameMins,
+  subInput, setSubInput,
+  excludedIds, setExcludedIds,
+  plan, setPlan,
+  saved, setSaved,
+  overrides, setOverrides,
+}) {
   const availablePlayers = players.filter(p=>!excludedIds.has(p.id));
 
   // Auto-suggest sub windows when player count changes
@@ -1071,8 +1072,7 @@ function NewGameTab({players, seasonHistory, onConfirm, formation, onFormationCh
 
   function generate() {
     setSaved(false);
-    setOverrides({});
-    setPlan(generatePlan(availablePlayers, formation, gameMins, parseSubTimes(), seasonHistory, []));
+    setPlan(generatePlan(availablePlayers, formation, gameMins, parseSubTimes(), seasonHistory, overrideList(overrides)));
   }
 
   function applyOverride(posIdx, pi, playerId, clearAll) {
@@ -1329,6 +1329,15 @@ function App() {
   });
   const [formation, setFormation] = useState(() => lsGet("formation", "2-3-1"));
   const [tab, setTab] = useState("players");
+
+  // New Game tab state — lifted here so it survives switching tabs
+  const [newGameMins, setNewGameMins] = useState(40);
+  const [newGameSubInput, setNewGameSubInput] = useState("");
+  const [newGameExcludedIds, setNewGameExcludedIds] = useState(new Set());
+  const [newGamePlan, setNewGamePlan] = useState(null);
+  const [newGameSaved, setNewGameSaved] = useState(false);
+  const [newGameOverrides, setNewGameOverrides] = useState({});
+
   const [seasonCode, setSeasonCode] = useState(() => getSeasonFromUrl() || lsGet("seasonCode", ""));
   const [syncStatus, setSyncStatus] = useState("");
   const [copied, setCopied] = useState(false);
@@ -1493,7 +1502,19 @@ function App() {
       </div>
       <main className="max-w-2xl mx-auto px-4 py-5">
         {tab==="players"&&<PlayersTab players={players} onAdd={addPlayer} onRemove={removePlayer}/>}
-        {tab==="game"&&<NewGameTab players={players} seasonHistory={seasonHistory} onConfirm={confirmGame} formation={formation} onFormationChange={setFormation}/>}
+        {tab==="game"&&<NewGameTab
+          players={players}
+          seasonHistory={seasonHistory}
+          onConfirm={confirmGame}
+          formation={formation}
+          onFormationChange={setFormation}
+          gameMins={newGameMins} setGameMins={setNewGameMins}
+          subInput={newGameSubInput} setSubInput={setNewGameSubInput}
+          excludedIds={newGameExcludedIds} setExcludedIds={setNewGameExcludedIds}
+          plan={newGamePlan} setPlan={setNewGamePlan}
+          saved={newGameSaved} setSaved={setNewGameSaved}
+          overrides={newGameOverrides} setOverrides={setNewGameOverrides}
+        />}
         {tab==="season"&&<SeasonTab players={players} seasonHistory={seasonHistory} games={games} onUndo={undoLastGame}/>}
       </main>
     </div>
