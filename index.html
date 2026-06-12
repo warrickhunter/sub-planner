@@ -124,6 +124,13 @@ function generatePlan(players, formation, gameMins, extraSubTimes, seasonHistory
 
   const targetSlots = (nPos * np) / players.length;
 
+  // Players benched in the immediately preceding period. Refreshed at the top of
+  // each period's loop iteration. pickBest always selects from these first, as a
+  // hard constraint, so nobody sits out two segments in a row — including across
+  // halftime. A score bonus isn't enough: season-history terms are unbounded and
+  // can swamp any fixed bonus.
+  let prevBenchIds = new Set();
+
   function scoreFor(p, group) {
     const h = seasonHistory[p.id] || {};
     const gMins = group === "GK" ? (h.gkMins||0) : (h[group+"Mins"]||0);
@@ -135,7 +142,8 @@ function generatePlan(players, formation, gameMins, extraSubTimes, seasonHistory
   }
 
   function pickBest(pool, group) {
-    return pool.reduce((b, p) => {
+    const mustPlay = pool.filter(p => prevBenchIds.has(p.id));
+    return (mustPlay.length ? mustPlay : pool).reduce((b, p) => {
       const s = scoreFor(p, group);
       return !b || s > b.s ? {p, s} : b;
     }, null);
@@ -177,6 +185,11 @@ function generatePlan(players, formation, gameMins, extraSubTimes, seasonHistory
 
   // ── Periods 1+: carry forward or substitute; full reshuffle at halftime ──
   for (let pi = 1; pi < np; pi++) {
+    // Snapshot bench BEFORE any state changes for this period (incl. GK swap
+    // and halftime reset). scoreFor reads this via closure.
+    prevBenchIds = new Set();
+    players.forEach(p => { if (onBench[p.id]) prevBenchIds.add(p.id); });
+
     const prevGK = periodGK[pi-1];
     const currGK = periodGK[pi];
     const isHalf = periods[pi].start === halfTime;
@@ -296,7 +309,9 @@ function generatePlan(players, formation, gameMins, extraSubTimes, seasonHistory
         const currentScore = scoreFor(current, group);
         const bestBench = pickBest(bench, group);
 
-        if (bestBench.s > currentScore + 30) {
+        // Forced sub if the bench pick sat out last period; otherwise only sub
+        // when meaningfully better, to avoid churn.
+        if (prevBenchIds.has(bestBench.p.id) || bestBench.s > currentScore + 30) {
           onBench[current.id] = true;
           asgn[posIdx][pi] = bestBench.p;
           posPlayer[posIdx] = bestBench.p;
