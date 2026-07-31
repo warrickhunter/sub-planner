@@ -1,0 +1,20 @@
+{
+  // Press F5 to open index.html in Edge with the VS Code debugger attached.
+  // JSX is compiled in the browser by Babel, so breakpoints in index.html
+  // won't map to source — but the Debug Console, network and DOM inspection
+  // all work against the running app.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Sub Planner (Edge)",
+      "type": "msedge",
+      "request": "launch",
+      "file": "${workspaceFolder}/index.html",
+      "webRoot": "${workspaceFolder}",
+      // A dedicated profile kept out of git, so the app's localStorage
+      // (squad + season history) survives between runs instead of being
+      // wiped with a throwaway temp profile each launch.
+      "userDataDir": "${workspaceFolder}/.vscode/.edge-profile"
+    }
+  ]
+}

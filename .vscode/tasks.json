@@ -1,0 +1,16 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      // Cmd+Shift+B — opens index.html in whatever your default browser is.
+      // No debugger, no profile juggling; uses your normal browser session.
+      "label": "Open Sub Planner in browser",
+      "type": "shell",
+      "command": "open",
+      "args": ["${workspaceFolder}/index.html"],
+      "problemMatcher": [],
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "never", "panel": "shared" }
+    }
+  ]
+}

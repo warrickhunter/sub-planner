@@ -71,7 +71,7 @@ const FORMATIONS = {
 // ─── ALGORITHM ───────────────────────────────────────────────────────────────
 // Key design: players carry forward in the SAME position each period until
 // explicitly subbed off. Position changes only happen via substitutions.
-function generatePlan(players, formation, gameMins, extraSubTimes, seasonHistory, overrides) {
+function generatePlan(players, formation, gameMins, extraSubTimes, seasonHistory, overrides, gkPick) {
   if (!players || players.length < 7) return null;
 
   // Build override lookup: overrideMap[pi][posIdx] = player
@@ -99,12 +99,15 @@ function generatePlan(players, formation, gameMins, extraSubTimes, seasonHistory
   }));
   const np = periods.length;
 
-  // Pick GKs: fewest GK minutes this season, must be different players
+  // Pick GKs: a manual pick always wins. Any half left on auto takes the fewest
+  // GK minutes this season, and auto-fill still avoids reusing the other half's
+  // keeper — but a deliberate pick of the same player for both halves is honoured.
   const byGK = [...players].sort((a,b) =>
     (seasonHistory[a.id]?.gkMins||0) - (seasonHistory[b.id]?.gkMins||0)
   );
-  const gk1 = byGK[0];
-  const gk2 = byGK.find(p => p.id !== gk1.id) || gk1;
+  const picked = id => (id ? players.find(p => p.id === id) : null);
+  const gk1 = picked(gkPick?.gk1) || byGK[0];
+  const gk2 = picked(gkPick?.gk2) || byGK.find(p => p.id !== gk1.id) || gk1;
   const periodGK = periods.map(p => p.isSecondHalf ? gk2 : gk1);
 
   // ── State ──
@@ -973,23 +976,36 @@ function PrintView({plan, players}) {
 }
 
 // ── Plan Display ──────────────────────────────────────────────────────────────
-function PlanDisplay({plan, players, onConfirm, onRegenerate, overrides, onOverride}) {
+function PlanDisplay({plan, players, onConfirm, onRegenerate, overrides, onOverride, gkPick, onGkPick}) {
   const [view, setView] = useState("subs");
   const hasOverrides = overrides && Object.keys(overrides).length > 0;
+  const hasGkPick = !!(gkPick?.gk1 || gkPick?.gk2);
   return (
     <div className="space-y-4">
-      {/* GK banner */}
-      <div className="no-print bg-amber-50 border border-amber-200 rounded-lg p-3 flex gap-6 text-sm">
-        <div>
-          <span className="text-gray-500 text-xs block">1st Half GK</span>
-          <span className="font-semibold text-amber-700">{plan.gk1.name}</span>
-        </div>
-        <div>
-          <span className="text-gray-500 text-xs block">2nd Half GK</span>
-          <span className="font-semibold text-amber-700">
-            {plan.gk2.id===plan.gk1.id ? `${plan.gk2.name} (same)` : plan.gk2.name}
-          </span>
-        </div>
+      {/* GK banner — both halves are editable; the rest of the plan rebalances */}
+      <div className="no-print bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-end gap-4 text-sm">
+        {[["gk1","1st Half GK"],["gk2","2nd Half GK"]].map(([slot,label]) => (
+          <div key={slot}>
+            <label className="text-gray-500 text-xs block mb-1">{label}</label>
+            <select
+              className="border border-amber-300 bg-white rounded px-1.5 py-1 text-sm font-semibold text-amber-700 focus:outline-none max-w-32"
+              value={plan[slot].id}
+              onChange={e => onGkPick(slot, e.target.value)}
+            >
+              {players.map(p => (
+                <option key={p.id} value={p.id}>
+                  {slot==="gk2" && p.id===plan.gk1.id ? `${p.name} (same)` : p.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        ))}
+        {hasGkPick && (
+          <button
+            className="text-xs text-amber-600 underline hover:text-amber-800 pb-1.5"
+            onClick={()=>onGkPick(null, null, true)}
+          >Reset to auto</button>
+        )}
         <div className="ml-auto text-right">
           <span className="text-gray-400 text-xs block">Players</span>
           <span className="font-semibold">{players.length}</span>
@@ -1057,6 +1073,7 @@ function NewGameTab({
   plan, setPlan,
   saved, setSaved,
   overrides, setOverrides,
+  gkPick, setGkPick,
 }) {
   const availablePlayers = players.filter(p=>!excludedIds.has(p.id));
 
@@ -1087,26 +1104,32 @@ function NewGameTab({
 
   function generate() {
     setSaved(false);
-    setPlan(generatePlan(availablePlayers, formation, gameMins, parseSubTimes(), seasonHistory, overrideList(overrides)));
+    setPlan(generatePlan(availablePlayers, formation, gameMins, parseSubTimes(), seasonHistory, overrideList(overrides), gkPick));
   }
 
   function applyOverride(posIdx, pi, playerId, clearAll) {
     if (clearAll) {
       setOverrides({});
-      setPlan(generatePlan(availablePlayers, formation, gameMins, parseSubTimes(), seasonHistory, []));
+      setPlan(generatePlan(availablePlayers, formation, gameMins, parseSubTimes(), seasonHistory, [], gkPick));
       return;
     }
     const key = `${posIdx}-${pi}`;
     const next = {...overrides};
     if (playerId === null) { delete next[key]; } else { next[key] = playerId; }
     setOverrides(next);
-    setPlan(generatePlan(availablePlayers, formation, gameMins, parseSubTimes(), seasonHistory, overrideList(next)));
+    setPlan(generatePlan(availablePlayers, formation, gameMins, parseSubTimes(), seasonHistory, overrideList(next), gkPick));
+  }
+
+  function applyGkPick(slot, playerId, reset) {
+    const next = reset ? {gk1:null, gk2:null} : {...gkPick, [slot]: playerId};
+    setGkPick(next);
+    setPlan(generatePlan(availablePlayers, formation, gameMins, parseSubTimes(), seasonHistory, overrideList(overrides), next));
   }
 
   function confirm() {
     if (!plan) return;
     onConfirm(plan, availablePlayers);
-    setPlan(null); setSaved(true); setOverrides({});
+    setPlan(null); setSaved(true); setOverrides({}); setGkPick({gk1:null, gk2:null});
   }
 
   return (
@@ -1197,7 +1220,7 @@ function NewGameTab({
       )}
 
       {plan&&(
-        <PlanDisplay plan={plan} players={availablePlayers} onConfirm={confirm} onRegenerate={generate} overrides={overrides} onOverride={applyOverride}/>
+        <PlanDisplay plan={plan} players={availablePlayers} onConfirm={confirm} onRegenerate={generate} overrides={overrides} onOverride={applyOverride} gkPick={gkPick} onGkPick={applyGkPick}/>
       )}
     </div>
   );
@@ -1352,6 +1375,7 @@ function App() {
   const [newGamePlan, setNewGamePlan] = useState(null);
   const [newGameSaved, setNewGameSaved] = useState(false);
   const [newGameOverrides, setNewGameOverrides] = useState({});
+  const [newGameGkPick, setNewGameGkPick] = useState({gk1:null, gk2:null});
 
   const [seasonCode, setSeasonCode] = useState(() => getSeasonFromUrl() || lsGet("seasonCode", ""));
   const [syncStatus, setSyncStatus] = useState("");
@@ -1529,6 +1553,7 @@ function App() {
           plan={newGamePlan} setPlan={setNewGamePlan}
           saved={newGameSaved} setSaved={setNewGameSaved}
           overrides={newGameOverrides} setOverrides={setNewGameOverrides}
+          gkPick={newGameGkPick} setGkPick={setNewGameGkPick}
         />}
         {tab==="season"&&<SeasonTab players={players} seasonHistory={seasonHistory} games={games} onUndo={undoLastGame}/>}
       </main>
